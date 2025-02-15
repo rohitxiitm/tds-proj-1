@@ -1,4 +1,5 @@
 import os
+import base64
 
 is_local = True
 
@@ -40,3 +41,9 @@ def safe_write(path: str, data, *args, **kwargs):
     os.makedirs(os.path.dirname(safe_file_path), exist_ok=True)
     with open(safe_file_path, "w", *args, **kwargs) as f:
         return f.write(data)
+
+
+def png_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        base64_string = base64.b64encode(image_file.read()).decode("utf-8")
+    return base64_string

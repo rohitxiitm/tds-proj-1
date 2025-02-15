@@ -5,8 +5,11 @@ build/
 dist/
 wheels/
 *.egg-info
+data
 
 # Virtual environments
 .venv
 
 .env
+datagen.py
+evaluate.py

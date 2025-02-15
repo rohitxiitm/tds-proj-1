@@ -1,15 +1,24 @@
+import json
+import logging
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-import tools.phaseA as phaseATools
-import json
-import logging
-from utils import safe_read
-from llm import ask_llm
-
-from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(
+    level=logging.INFO,  # Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",  # Log format
+)
+
+# Create a logger
+logger = logging.getLogger(__name__)
+
+from utils import safe_read
+from llm import ask_llm
+import tools.phaseA as phaseATools
+
 
 app = FastAPI()
 
@@ -38,14 +47,6 @@ tools = [
     ]
 ]
 
-logging.basicConfig(
-    level=logging.INFO,  # Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",  # Log format
-)
-
-# Create a logger
-logger = logging.getLogger(__name__)
-
 
 @app.get("/")
 def home():
@@ -64,22 +65,29 @@ def health_check():
 @app.post("/run")
 async def run_task(task: str):
     try:
-        print("Running Task : ", task)
-        messages = (
-            [
-                {
-                    "role": "system",
-                    "content": "You are a function classifier that extracts structured parameters from queries.",
-                },
-                {"role": "user", "content": task},
-            ],
-        )
+        logger.info(f"Running Task: {task}")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a function classifier that analyzes user queries and selects "
+                    "the appropriate tool from available options. For each query:\n"
+                    "1. Understand the user's request\n"
+                    "2. Match it to the most suitable tool\n"
+                    "3. Extract required parameters accurately\n\n"
+                    "For SQL-related tasks specifically:\n"
+                    "- Construct precise queries without additional text\n"
+                    "- Ensure query produces exactly the requested output"
+                ),
+            },
+            {"role": "user", "content": task},
+        ]
         tools_pool = tools
         response = ask_llm(messages, tools_pool)
         message = response.choices[0].message
         if not hasattr(message, "tool_calls") or not message.tool_calls:
             # If no tool calls, return the message content as error
-            raise HTTPException(status_code=400, detail=message.content)
+            raise HTTPException(status_code=400, detail=str(message.content))
 
         tool_call = message.tool_calls[0].function
         task_code = tool_call.name
@@ -93,7 +101,7 @@ async def run_task(task: str):
                 return tool_response
 
     except Exception as e:
-        print("error occurred", e)
+        logger.error("error occurred", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -103,9 +111,9 @@ async def read_file(path: str = Query(..., description="File path to read")):
     try:
         return safe_read(path)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=404, message="File not found", status="error")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, message=str(e), status="error")
 
 
 if __name__ == "__main__":

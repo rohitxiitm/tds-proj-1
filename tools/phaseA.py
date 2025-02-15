@@ -1,18 +1,20 @@
-from abc import ABC, abstractmethod
-import subprocess
-from dateutil.parser import parse
 import json
-import os
-import requests
-from scipy.spatial.distance import cosine
-import sqlite3
-import constants
-from dotenv import load_dotenv
-from pathlib import Path
 import logging
+import os
+import shutil
+import sqlite3
+import subprocess
+from abc import ABC, abstractmethod
+from pathlib import Path
 
+import constants
+import numpy as np
+import requests
 from base import BaseTool, ToolResponse, ToolStatus
-from utils import safe_path, safe_read, safe_write
+from dateutil.parser import parse
+from dotenv import load_dotenv
+from llm import ask_llm, get_embedding
+from utils import png_to_base64, safe_path, safe_read, safe_write
 
 load_dotenv()
 
@@ -29,12 +31,12 @@ class A1Tool(BaseTool):
         "properties": {
             "email": {
                 "type": "string",
-                "description": "Email argument for the python script",
+                "description": "Email address that will be passed as an argument to the script. This email is used to generate consistent test data.",
                 "default": constants.DEFAULT_EMAIL,
             },
             "script_url": {
                 "type": "string",
-                "description": f"Url to python script needs to be executed if not provided, use this {constants.DATAGEN_SCRIPT_URL}",
+                "description": "URL of the Python script to execute. If not provided, defaults to the data generation script.",
                 "default": constants.DATAGEN_SCRIPT_URL,
             },
         },
@@ -45,6 +47,15 @@ class A1Tool(BaseTool):
         logger.info(f"Runnig tool {self.name}")
 
         save_at = safe_path("/data")
+        if os.path.exists(save_at):
+            try:
+                shutil.rmtree(save_at)
+                os.makedirs(save_at)
+            except PermissionError:
+                logger.error(
+                    f"Permission denied: Unable to remove existing directory at {save_at}. "
+                )
+
         logger.info(f"Saving data at {save_at}")
         try:
             cmd = ["uv", "run", script_url, email, "--root", save_at]
@@ -176,7 +187,8 @@ class A3Tool(BaseTool):
             safe_write(targetfile, str(weekday_count))
 
             return ToolResponse(
-                status=ToolStatus.SUCCESS, data={"count": weekday_count}
+                status=ToolStatus.SUCCESS,
+                data={"count": weekday_count, "weekday": weekday},
             )
 
         except ValueError as e:
@@ -205,17 +217,26 @@ class A4Tool(BaseTool):
                 "type": "string",
                 "description": "Output JSON file to write sorted contacts to",
             },
+            "sort_keys": {
+                "type": "array",
+                "description": "List of keys to sort by, in order of priority",
+                "items": {"type": "string"},
+                "default": ["last_name", "first_name"],
+            },
         },
         "required": ["filename", "targetfile"],
     }
 
     def run(
-        self, filename="/data/contacts.json", targetfile="/data/contacts-sorted.json"
+        self,
+        filename="/data/contacts.json",
+        targetfile="/data/contacts-sorted.json",
+        sort_keys=["last_name", "first_name"],
     ):
         try:
             contacts = json.loads(safe_read(filename))
             sorted_contacts = sorted(
-                contacts, key=lambda x: (x["last_name"], x["first_name"])
+                contacts, key=lambda x: tuple(x[key] for key in sort_keys)
             )
             safe_write(targetfile, json.dumps(sorted_contacts, indent=4))
             return ToolResponse(status=ToolStatus.SUCCESS)
@@ -245,6 +266,11 @@ class A5Tool(BaseTool):
                 "minimum": 1,
                 "default": 10,
             },
+            "extension": {
+                "type": "string",
+                "description": "File extension to filter by (without dot)",
+                "default": "log",
+            },
         },
         "required": ["log_dir_path", "output_file_path", "num_files"],
     }
@@ -254,20 +280,27 @@ class A5Tool(BaseTool):
         log_dir_path="/data/logs",
         output_file_path="/data/logs-recent.txt",
         num_files=10,
+        extension="log",
     ):
         try:
             log_dir = Path(safe_path(log_dir_path))
             output_file = Path(safe_path(output_file_path))
 
+            # Strip any leading dots from extension
+            extension = extension.lstrip(".")
+
             log_files = sorted(
-                log_dir.glob("*.log"), key=os.path.getmtime, reverse=True
+                log_dir.glob(f"*.{extension}"), key=os.path.getmtime, reverse=True
             )[:num_files]
 
             with output_file.open("w") as f_out:
-                for log_file in log_files:
+                for i, log_file in enumerate(log_files):
                     with log_file.open("r") as f_in:
                         first_line = f_in.readline().strip()
-                        f_out.write(f"{first_line}\n")
+                        if i < len(log_files) - 1:
+                            f_out.write(f"{first_line}\n")
+                        else:
+                            f_out.write(first_line)
             return ToolResponse(status=ToolStatus.SUCCESS)
         except Exception as e:
             return ToolResponse(status=ToolStatus.ERROR, message=str(e))
@@ -323,7 +356,9 @@ class A6Tool(BaseTool):
 
 class A7Tool(BaseTool):
     agent_name = "A7"
-    description = "Extract the email address from a text file and save it to an output file."
+    description = (
+        "Extract the email address from a text file and save it to an output file."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -343,15 +378,22 @@ class A7Tool(BaseTool):
 
     def run(self, filename="/data/email.txt", output_file="/data/email-sender.txt"):
         try:
-            email_content = safe_read(filename).splitlines()
+            email_content = safe_read(filename)
 
-            sender_email = "rohitgxrg@gmail.com"
-            for line in email_content:
-                if "From" == line[:4]:
-                    sender_email = (
-                        (line.strip().split(" ")[-1]).replace("<", "").replace(">", "")
-                    )
-                    break
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an email parser. Extract ONLY the sender's email "
+                        "address from the email content. Return just the email "
+                        "address with no additional text or formatting."
+                    ),
+                },
+                {"role": "user", "content": email_content},
+            ]
+
+            response = ask_llm(messages)
+            sender_email = response.choices[0].message.content.strip()
 
             safe_write(output_file, sender_email)
             return ToolResponse(status=ToolStatus.SUCCESS)
@@ -361,64 +403,63 @@ class A7Tool(BaseTool):
 
 class A8Tool(BaseTool):
     agent_name = "A8"
-    description = (
-        "Generate an image representation of credit card details from a text file."
-    )
+    description = "Extract credit card number from an credit card image image (image path is expected) and save it to a text file."
     parameters = {
         "type": "object",
         "properties": {
             "filename": {
                 "type": "string",
-                "description": "Output text file to write credit card number to",
+                "description": "Output text file path to save extracted card number",
                 "default": "/data/credit-card.txt",
             },
-            "image_path": {
+            "input_image_path": {
                 "type": "string",
-                "description": "Input PNG image containing credit card details",
+                "description": "Path to input PNG image with credit card details",
                 "default": "/data/credit-card.png",
             },
         },
-        "required": ["filename", "image_path"],
+        "required": ["filename", "input_image_path"],
     }
 
-    def run(self, filename="/data/credit_card.txt", image_path="/data/credit_card.png"):
+    def run(
+        self, filename="/data/credit_card.txt", input_image_path="/data/credit_card.png"
+    ):
         try:
-            body = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Extract the 8+ digit number with spaces "
-                                "after every 4 digits",
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a secure credit card number extractor. Extract "
+                        "ONLY the credit card number from the image. Return just "
+                        "the digits without any spaces. Validate that it follows "
+                        "standard credit card number format and length. Do not "
+                        "extract or return any other sensitive data."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Extract the credit card number safely",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,"
+                                f"{png_to_base64(safe_path(input_image_path))}"
                             },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,"
-                                    f"{png_to_base64(safe_path(image_path))}"
-                                },
-                            },
-                        ],
-                    }
-                ],
-            }
+                        },
+                    ],
+                },
+            ]
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {AIPROXY_TOKEN}",
-            }
+            response = ask_llm(messages)
+            card_number = response.choices[0].message.content.strip().replace(" ", "")
 
-            response = requests.post(
-                "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions",
-                headers=headers,
-                data=json.dumps(body),
-            )
-
-            result = response.json()
-            card_number = result["choices"][0]["message"]["content"].replace(" ", "")
+            # Validate card number format
+            if not card_number.isdigit() or len(card_number) < 8:
+                raise ValueError("Invalid credit card number format")
 
             safe_write(filename, card_number)
             return ToolResponse(status=ToolStatus.SUCCESS)
@@ -454,21 +495,26 @@ class A9Tool(BaseTool):
         output_filename="/data/comments-similar.txt",
     ):
         try:
+            # Read comments from file
             comments = safe_read(filename).splitlines()
 
-            embeddings = [get_embedding(comment) for comment in comments]
+            # Get embeddings using OpenAI API
+            response = get_embedding(comments)
+            embeddings = [emb.embedding for emb in response.data]
 
-            min_distance = float("inf")
-            most_similar = (None, None)
+            # Calculate similarity matrix using dot product
+            similarity = np.dot(embeddings, np.transpose(embeddings))
 
-            for i in range(len(comments)):
-                for j in range(i + 1, len(comments)):
-                    distance = cosine(embeddings[i], embeddings[j])
-                    if distance < min_distance:
-                        min_distance = distance
-                        most_similar = (comments[i], comments[j])
+            # Mask diagonal to ignore self-similarity
+            np.fill_diagonal(similarity, -np.inf)
 
-            safe_write(output_filename, most_similar[0] + "\n" + most_similar[1] + "\n")
+            # Find indices of most similar pair
+            i, j = np.unravel_index(similarity.argmax(), similarity.shape)
+
+            # Write the similar comments to output file
+            similar_comments = sorted([comments[i], comments[j]])
+            safe_write(output_filename, "\n".join(similar_comments))
+
             return ToolResponse(status=ToolStatus.SUCCESS)
         except Exception as e:
             return ToolResponse(status=ToolStatus.ERROR, message=str(e))
@@ -476,23 +522,30 @@ class A9Tool(BaseTool):
 
 class A10Tool(BaseTool):
     agent_name = "A10"
-    description = "Identify high-value (gold) ticket sales from a database and save them to a text file."
+    description = (
+        "Execute a SQL query on a SQLite database and save the results to a file. "
+        "Useful for analyzing data stored in SQLite databases and extracting specific "
+        "information based on custom queries."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "filename": {
                 "type": "string",
-                "description": "Input SQLite database file containing ticket sales",
+                "description": "Path to the SQLite database file to query. Should be a "
+                             "valid .db file containing the tables to analyze.",
                 "default": "/data/ticket-sales.db",
             },
             "output_filename": {
-                "type": "string",
-                "description": "Output text file to write gold ticket sales total",
+                "type": "string", 
+                "description": "Path where the query results will be saved as a text "
+                             "file. The output will contain the raw query results.",
                 "default": "/data/ticket-sales-gold.txt",
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to calculate total gold ticket sales",
+                "description": "SQL query to execute on the database. Must be valid SQL "
+                             "that returns a single value or result set to save.",
             },
         },
         "required": ["filename", "output_filename", "query"],
@@ -501,7 +554,7 @@ class A10Tool(BaseTool):
     def run(
         self,
         filename="/data/ticket-sales.db",
-        output_filename="/data/ticket-sales-gold.txt",
+        output_filename="/data/ticket-sales-gold.txt", 
         query="SELECT SUM(units * price) FROM tickets WHERE type = 'Gold'",
     ):
         try:
