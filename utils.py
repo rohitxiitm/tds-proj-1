@@ -1,7 +1,7 @@
 import os
 import base64
 
-is_local = True
+is_local = False
 
 
 def safe_path(path: str) -> str:

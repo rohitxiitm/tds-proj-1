@@ -73,7 +73,7 @@ class A1Tool(BaseTool):
 
 class A2Tool(BaseTool):
     agent_name = "A2"
-    description = "Format a markdown file using a specified version of Prettier."
+    description = "Format a markdown file using a specified version of Prettier.(this is not used for file conversions like markdown to html)"
     parameters = {
         "type": "object",
         "properties": {
@@ -104,20 +104,31 @@ class A2Tool(BaseTool):
         # Construct prettier version string
         prettier_pkg = f"prettier@{prettier_version}"
 
-        cmd = ["npx", "--yes", prettier_pkg, "--write", safe_filename]
+        cmd = [
+            "npx",
+            "--yes",
+            prettier_pkg,
+            "--write",
+            "--ignore-path",
+            ".emptyignore",
+            safe_filename,
+        ]
 
         logger.info(f"Running cmd  {' '.join(cmd)}")
 
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                return ToolResponse(
+                    status=ToolStatus.ERROR, message=f"Prettier failed: {stderr}"
+                )
             return ToolResponse(
                 status=ToolStatus.SUCCESS,
                 message="File formatted successfully",
-                data={"output": result.stdout},
-            )
-        except subprocess.CalledProcessError as e:
-            return ToolResponse(
-                status=ToolStatus.ERROR, message=f"Prettier failed: {e.stderr}"
+                data={"output": stdout},
             )
         except Exception as e:
             return ToolResponse(
@@ -522,30 +533,23 @@ class A9Tool(BaseTool):
 
 class A10Tool(BaseTool):
     agent_name = "A10"
-    description = (
-        "Execute a SQL query on a SQLite database and save the results to a file. "
-        "Useful for analyzing data stored in SQLite databases and extracting specific "
-        "information based on custom queries."
-    )
+    description = "Takes a sqlite db database path(this is used when you are expecting one single value in output)"
     parameters = {
         "type": "object",
         "properties": {
             "filename": {
                 "type": "string",
-                "description": "Path to the SQLite database file to query. Should be a "
-                             "valid .db file containing the tables to analyze.",
+                "description": "Input SQLite database file ",
                 "default": "/data/ticket-sales.db",
             },
             "output_filename": {
-                "type": "string", 
-                "description": "Path where the query results will be saved as a text "
-                             "file. The output will contain the raw query results.",
+                "type": "string",
+                "description": "Output text file to write the query output",
                 "default": "/data/ticket-sales-gold.txt",
             },
             "query": {
                 "type": "string",
-                "description": "SQL query to execute on the database. Must be valid SQL "
-                             "that returns a single value or result set to save.",
+                "description": "SQL query to answer the question",
             },
         },
         "required": ["filename", "output_filename", "query"],
@@ -554,7 +558,7 @@ class A10Tool(BaseTool):
     def run(
         self,
         filename="/data/ticket-sales.db",
-        output_filename="/data/ticket-sales-gold.txt", 
+        output_filename="/data/ticket-sales-gold.txt",
         query="SELECT SUM(units * price) FROM tickets WHERE type = 'Gold'",
     ):
         try:
